@@ -1,10 +1,15 @@
 import base64
 import json
+import os.path
+import warnings
+import logging
+
 import numpy as np
 import zlib
-from PIL import Image, PngImagePlugin, ImageDraw, ImageFont
-from fonts.ttf import Roboto
+from PIL import Image, ImageDraw
 import torch
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingEncoder(json.JSONEncoder):
@@ -16,7 +21,7 @@ class EmbeddingEncoder(json.JSONEncoder):
 
 class EmbeddingDecoder(json.JSONDecoder):
     def __init__(self, *args, **kwargs):
-        json.JSONDecoder.__init__(self, object_hook=self.object_hook, *args, **kwargs)
+        json.JSONDecoder.__init__(self, *args, object_hook=self.object_hook, **kwargs)
 
     def object_hook(self, d):
         if 'TORCHTENSOR' in d:
@@ -42,7 +47,7 @@ def lcg(m=2**32, a=1664525, c=1013904223, seed=0):
 
 def xor_block(block):
     g = lcg()
-    randblock = np.array([next(g) for _ in range(np.product(block.shape))]).astype(np.uint8).reshape(block.shape)
+    randblock = np.array([next(g) for _ in range(np.prod(block.shape))]).astype(np.uint8).reshape(block.shape)
     return np.bitwise_xor(block.astype(np.uint8), randblock & 0x0F)
 
 
@@ -75,10 +80,10 @@ def insert_image_data_embed(image, data):
     next_size = data_np_low.shape[0] + (h-(data_np_low.shape[0] % h))
     next_size = next_size + ((h*d)-(next_size % (h*d)))
 
-    data_np_low.resize(next_size)
+    data_np_low = np.resize(data_np_low, next_size)
     data_np_low = data_np_low.reshape((h, -1, d))
 
-    data_np_high.resize(next_size)
+    data_np_high = np.resize(data_np_high, next_size)
     data_np_high = data_np_high.reshape((h, -1, d))
 
     edge_style = list(data['string_to_param'].values())[0].cpu().detach().numpy().tolist()[0][:1024]
@@ -113,7 +118,7 @@ def extract_image_data_embed(image):
     outarr = crop_black(np.array(image.convert('RGB').getdata()).reshape(image.size[1], image.size[0], d).astype(np.uint8)) & 0x0F
     black_cols = np.where(np.sum(outarr, axis=(0, 2)) == 0)
     if black_cols[0].shape[0] < 2:
-        print('No Image data blocks found.')
+        logger.debug(f'{os.path.basename(getattr(image, "filename", "unknown image file"))}: no embedded information found.')
         return None
 
     data_block_lower = outarr[:, :black_cols[0].min(), :].astype(np.uint8)
@@ -130,17 +135,17 @@ def extract_image_data_embed(image):
 
 
 def caption_image_overlay(srcimage, title, footerLeft, footerMid, footerRight, textfont=None):
+    from modules.images import get_font
+    if textfont:
+        warnings.warn(
+            'passing in a textfont to caption_image_overlay is deprecated and does nothing',
+            DeprecationWarning,
+            stacklevel=2,
+        )
     from math import cos
 
     image = srcimage.copy()
-
-    if textfont is None:
-        try:
-            textfont = ImageFont.truetype(opts.font or Roboto, fontsize)
-            textfont = opts.font or Roboto
-        except Exception:
-            textfont = Roboto
-
+    fontsize = 32
     factor = 1.5
     gradient = Image.new('RGBA', (1, image.size[1]), color=(0, 0, 0, 0))
     for y in range(image.size[1]):
@@ -150,13 +155,13 @@ def caption_image_overlay(srcimage, title, footerLeft, footerMid, footerRight, t
     image = Image.alpha_composite(image.convert('RGBA'), gradient.resize(image.size))
 
     draw = ImageDraw.Draw(image)
-    fontsize = 32
-    font = ImageFont.truetype(textfont, fontsize)
+
+    font = get_font(fontsize)
     padding = 10
 
     _, _, w, h = draw.textbbox((0, 0), title, font=font)
     fontsize = min(int(fontsize * (((image.size[0]*0.75)-(padding*4))/w)), 72)
-    font = ImageFont.truetype(textfont, fontsize)
+    font = get_font(fontsize)
     _, _, w, h = draw.textbbox((0, 0), title, font=font)
     draw.text((padding, padding), title, anchor='lt', font=font, fill=(255, 255, 255, 230))
 
@@ -167,7 +172,7 @@ def caption_image_overlay(srcimage, title, footerLeft, footerMid, footerRight, t
     _, _, w, h = draw.textbbox((0, 0), footerRight, font=font)
     fontsize_right = min(int(fontsize * (((image.size[0]/3)-(padding))/w)), 72)
 
-    font = ImageFont.truetype(textfont, min(fontsize_left, fontsize_mid, fontsize_right))
+    font = get_font(min(fontsize_left, fontsize_mid, fontsize_right))
 
     draw.text((padding, image.size[1]-padding),               footerLeft, anchor='ls', font=font, fill=(255, 255, 255, 230))
     draw.text((image.size[0]/2, image.size[1]-padding),       footerMid, anchor='ms', font=font, fill=(255, 255, 255, 230))
@@ -192,11 +197,11 @@ if __name__ == '__main__':
 
     embedded_image = insert_image_data_embed(cap_image, test_embed)
 
-    retrived_embed = extract_image_data_embed(embedded_image)
+    retrieved_embed = extract_image_data_embed(embedded_image)
 
-    assert str(retrived_embed) == str(test_embed)
+    assert str(retrieved_embed) == str(test_embed)
 
-    embedded_image2 = insert_image_data_embed(cap_image, retrived_embed)
+    embedded_image2 = insert_image_data_embed(cap_image, retrieved_embed)
 
     assert embedded_image == embedded_image2
 
